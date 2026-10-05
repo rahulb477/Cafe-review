@@ -1,0 +1,14 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "clients": {
+      "$clientId": {
+        "live": {
+          ".read": true,
+          ".write": "auth != null && auth.token.role === 'admin'"
+        }
+      }
+    }
+  }
+}

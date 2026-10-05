@@ -1,0 +1,18 @@
+rules_version = '2';
+// Customer App only READS admin-approved public assets. Uploads are Admin-only.
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAdmin() { return request.auth != null && request.auth.token.get('role', '') == 'admin'; }
+
+    // clients/{clientId}/public/** — logos, covers, menu & reward images
+    match /clients/{clientId}/public/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin()
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+    match /{allPaths=**} {
+      allow read, write: if isAdmin();
+    }
+  }
+}
