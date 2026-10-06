@@ -1,341 +1,969 @@
 rules_version = '2';
 
-// ═════════════════════════════════════════════════════════════════════════════
-// cafe-review7 — COMPLETE Firestore Security Rules (Admin Panel + Customer App)
-//
-// Roles (existing Admin schema)
-//   Admin    : admins/{uid} exists (and is not disabled, if it carries active/status)
-//   Staff    : staffUsers/{uid} { clientId, ... } → own business only (disabled if
-//              active == false or status in disabled/inactive/suspended)
-//   Customer : any other signed-in user (Firebase Anonymous Auth). UID = customer id.
-//
-// Customer registration (v4) — ONE transaction writes, cross-validated with getAfter():
-//   customers/{uid}                     { ..., clientId, normalizedPhone, phoneIndexId, qrToken }
-//   customerPhoneIndex/{phoneIndexId}   { phone, clientId, customerId }      phoneIndexId = clientId + '_' + digits
-//   customerTokens/{token}              { customerId, clientId, createdAt }
-// ═════════════════════════════════════════════════════════════════════════════
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-    function signedIn() { return request.auth != null; }
-    function uid() { return request.auth.uid; }
-    function inactiveStatus(s) {
-      return s in ['disabled', 'DISABLED', 'inactive', 'INACTIVE', 'suspended', 'SUSPENDED'];
+    // ============================================================
+    // HELPERS
+    // ============================================================
+
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // Admin = admins/{uid} exists. If the document carries `active: false` or a
-    // disabled status, access is denied; documents without those fields stay admin.
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function inactiveStatus(s) {
+      return s in [
+        'disabled',
+        'DISABLED',
+        'inactive',
+        'INACTIVE',
+        'suspended',
+        'SUSPENDED'
+      ];
+    }
+
+    // ============================================================
+    // ADMIN
+    // ============================================================
+
     function isActiveAdmin() {
       return signedIn()
-        && exists(/databases/$(database)/documents/admins/$(uid()))
-        && get(/databases/$(database)/documents/admins/$(uid())).data.get('active', true) != false
-        && !inactiveStatus(get(/databases/$(database)/documents/admins/$(uid())).data.get('status', 'active'));
+        && exists(
+          /databases/$(database)/documents/admins/$(uid())
+        )
+        && get(
+          /databases/$(database)/documents/admins/$(uid())
+        ).data.get('active', true) != false
+        && !inactiveStatus(
+          get(
+            /databases/$(database)/documents/admins/$(uid())
+          ).data.get('status', 'active')
+        );
     }
 
-    // Business of the signed-in active staff member ('' if not active staff).
+    // ============================================================
+    // STAFF
+    // ============================================================
+
     function staffClientId() {
       return signedIn()
-        && exists(/databases/$(database)/documents/staffUsers/$(uid()))
-        && get(/databases/$(database)/documents/staffUsers/$(uid())).data.get('active', true) != false
-        && !inactiveStatus(get(/databases/$(database)/documents/staffUsers/$(uid())).data.get('status', 'active'))
-          ? get(/databases/$(database)/documents/staffUsers/$(uid())).data.get('clientId', '')
+        && exists(
+          /databases/$(database)/documents/staffUsers/$(uid())
+        )
+        && get(
+          /databases/$(database)/documents/staffUsers/$(uid())
+        ).data.get('active', true) != false
+        && !inactiveStatus(
+          get(
+            /databases/$(database)/documents/staffUsers/$(uid())
+          ).data.get('status', 'active')
+        )
+          ? get(
+              /databases/$(database)/documents/staffUsers/$(uid())
+            ).data.get('clientId', '')
           : '';
     }
+
     function isStaffOf(clientId) {
-      return signedIn() && clientId is string && clientId != ''
-        && (isActiveAdmin() || staffClientId() == clientId);
+      return signedIn()
+        && clientId is string
+        && clientId != ''
+        && (
+          isActiveAdmin()
+          || staffClientId() == clientId
+        );
     }
+
+    // ============================================================
+    // PUBLIC CLIENT
+    // ============================================================
 
     function isPublished(data) {
       return !('status' in data)
-        || data.status in ['PUBLISHED', 'published', 'ACTIVE', 'active', 'LIVE', 'live'];
+        || data.status in [
+          'PUBLISHED',
+          'published',
+          'ACTIVE',
+          'active',
+          'LIVE',
+          'live'
+        ];
     }
+
     function clientIsPublic(clientId) {
-      return clientId is string && clientId != ''
-        && exists(/databases/$(database)/documents/clients/$(clientId))
-        && isPublished(get(/databases/$(database)/documents/clients/$(clientId)).data);
+      return clientId is string
+        && clientId != ''
+        && exists(
+          /databases/$(database)/documents/clients/$(clientId)
+        )
+        && isPublished(
+          get(
+            /databases/$(database)/documents/clients/$(clientId)
+          ).data
+        );
     }
+
+    // ============================================================
+    // VALIDATION HELPERS
+    // ============================================================
 
     function optStr(data, key, max) {
-      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= max);
-    }
-    function strList(v, maxItems, maxLen) {
-      return v is list && v.size() <= maxItems
-        && (v.size() == 0 || (v[0] is string && v[0].size() <= maxLen));
-    }
-    function validName(n) { return n is string && n.size() >= 2 && n.size() <= 50; }
-    // Canonical Indian mobile: +91 followed by 10 digits starting 6-9
-    function validPhone(p) { return p is string && p.matches('^[+]91[6-9][0-9]{9}$'); }
-    function validEmail(e) {
-      return e == null || (e is string && e.size() <= 254 && e.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$'));
-    }
-    // Identical to phoneIndexId() in src/shared/phone.ts. NO regex:
-    // normalizedPhone is "+91XXXXXXXXXX", so phone[1:] is exactly its digits.
-    function phoneKey(clientId, phone) { return clientId + '_' + phone[1:]; }
-    // After this commit, customerTokens/{token} belongs to `owner` at business `clientId`.
-    function tokenAfterMatches(token, owner, clientId) {
-      return token is string && token.matches('^[a-f0-9]{64}$')
-        && getAfter(/databases/$(database)/documents/customerTokens/$(token)).data.customerId == owner
-        && getAfter(/databases/$(database)/documents/customerTokens/$(token)).data.clientId == clientId;
+      return !(key in data)
+        || data[key] == null
+        || (
+          data[key] is string
+          && data[key].size() <= max
+        );
     }
 
-    // ── Admin Panel: full access to every collection ─────────────────────────
+    function strList(v, maxItems, maxLen) {
+      return v is list
+        && v.size() <= maxItems
+        && (
+          v.size() == 0
+          || (
+            v[0] is string
+            && v[0].size() <= maxLen
+          )
+        );
+    }
+
+    function validName(n) {
+      return n is string
+        && n.size() >= 2
+        && n.size() <= 50;
+    }
+
+    function validPhone(p) {
+      return p is string
+        && p.matches('^[+]91[6-9][0-9]{9}$');
+    }
+
+    function validEmail(e) {
+      return e == null
+        || (
+          e is string
+          && e.size() <= 254
+          && e.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$')
+        );
+    }
+
+    function phoneKey(clientId, phone) {
+      return clientId + '_' + phone[1:];
+    }
+
+    // ============================================================
+    // QR TOKEN ATOMIC VALIDATION
+    // ============================================================
+
+    function tokenAfterMatches(token, owner, clientId) {
+      return token is string
+        && token.matches('^[a-f0-9]{64}$')
+        && getAfter(
+          /databases/$(database)/documents/customerTokens/$(token)
+        ).data.customerId == owner
+        && getAfter(
+          /databases/$(database)/documents/customerTokens/$(token)
+        ).data.clientId == clientId;
+    }
+
+    // ============================================================
+    // ADMIN FULL ACCESS
+    // ============================================================
+
     match /{document=**} {
       allow read, write: if isActiveAdmin();
     }
 
-    // ── Admins / staff registry (written by the Admin Panel) ─────────────────
+    // ============================================================
+    // ADMINS
+    // ============================================================
+
     match /admins/{adminId} {
       allow get: if signedIn() && uid() == adminId;
     }
+
+    // ============================================================
+    // STAFF REGISTRY
+    // ============================================================
+
     match /staffUsers/{staffId} {
+
       allow get: if signedIn() && uid() == staffId;
-      // Query must filter clientId == own business.
-      allow list: if staffClientId() != '' && resource.data.clientId == staffClientId();
+
+      allow list: if staffClientId() != ''
+        && resource.data.clientId == staffClientId();
     }
 
-    // ── Businesses (tenants) ─────────────────────────────────────────────────
+    // ============================================================
+    // CLIENTS / BUSINESSES
+    // ============================================================
+
     match /clients/{clientId} {
-      // Single read: published businesses (Customer App branding/menu/links/Wi-Fi name/
-      // loyalty config) or the business's own staff.
-      allow get: if isPublished(resource.data) || isStaffOf(clientId);
-      // Query (Customer App server resolves /{slug}): ONLY queries constrained to
-      // status == 'PUBLISHED' — the exact value used by the app (PUBLISHED_STATUS in
-      // src/services/firebase/firebaseConfig.ts) and by the Admin Panel when publishing.
-      // Draft/unpublished tenants can never be enumerated.
-      allow list: if resource.data.status == 'PUBLISHED';
+
+      // Public customer application can read published businesses.
+      // Staff can read their own business.
+      allow get:
+        if isPublished(resource.data)
+        || isStaffOf(clientId);
+
+      // Customer App resolves published businesses by slug.
+      // Only PUBLISHED businesses may be queried.
+      allow list:
+        if resource.data.status == 'PUBLISHED';
+
+      // ----------------------------------------------------------
+      // MENU CATEGORIES
+      // ----------------------------------------------------------
 
       match /menuCategories/{categoryId} {
-        allow read: if clientIsPublic(clientId) || isStaffOf(clientId);
+        allow read:
+          if clientIsPublic(clientId)
+          || isStaffOf(clientId);
       }
+
+      // ----------------------------------------------------------
+      // MENU ITEMS
+      // ----------------------------------------------------------
 
       match /menuItems/{itemId} {
-        allow read: if clientIsPublic(clientId) || isStaffOf(clientId);
+        allow read:
+          if clientIsPublic(clientId)
+          || isStaffOf(clientId);
       }
+
+      // ----------------------------------------------------------
+      // REWARDS
+      // ----------------------------------------------------------
 
       match /rewards/{rewardId} {
-        allow read: if clientIsPublic(clientId) || isStaffOf(clientId);
+        allow read:
+          if clientIsPublic(clientId)
+          || isStaffOf(clientId);
       }
+
+      // ----------------------------------------------------------
+      // QR CONFIGURATIONS
+      // ----------------------------------------------------------
 
       match /qrConfigurations/{qrId} {
-        allow read: if isStaffOf(clientId);
+        allow read:
+          if isStaffOf(clientId);
       }
 
-      // Loyalty operations — business staff and admins.
+      // ==========================================================
+      // STAMP TRANSACTIONS
+      // ==========================================================
+
       match /stampTransactions/{transactionId} {
-        allow read: if isStaffOf(clientId);
-        allow create: if isStaffOf(clientId)
-          && request.resource.data.get('clientId', clientId) == clientId;
-        // Mark an existing, uncounted transaction as visit-counted exactly once.
-        allow update: if isStaffOf(clientId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['visitCounted', 'visitCountedAt'])
+
+        allow read:
+          if isStaffOf(clientId);
+
+        // Staff can create a transaction ONLY for:
+        // - their own business
+        // - an existing customer
+        // - that customer belonging to the same business
+        allow create:
+          if isStaffOf(clientId)
+          && request.resource.data.get('clientId', '') == clientId
+          && request.resource.data.get('customerId', '') is string
+          && request.resource.data.get('customerId', '') != ''
+          && exists(
+            /databases/$(database)/documents/customers/$(request.resource.data.customerId)
+          )
+          && get(
+            /databases/$(database)/documents/customers/$(request.resource.data.customerId)
+          ).data.get('clientId', '') == clientId;
+
+        // Staff can mark an existing uncounted transaction
+        // as visit-counted exactly once.
+        allow update:
+          if isStaffOf(clientId)
+          && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                'visitCounted',
+                'visitCountedAt'
+              ])
           && request.resource.data.visitCounted == true
           && resource.data.get('visitCounted', false) != true
           && request.resource.data.visitCountedAt == request.time;
       }
 
+      // ==========================================================
+      // REWARD REDEMPTIONS
+      // ==========================================================
+
       match /rewardRedemptions/{redemptionId} {
-        allow read: if isStaffOf(clientId);
-        allow create: if isStaffOf(clientId)
-          && request.resource.data.get('clientId', clientId) == clientId;
+
+        allow read:
+          if isStaffOf(clientId);
+
+        allow create:
+          if isStaffOf(clientId)
+          && request.resource.data.get('clientId', '') == clientId;
       }
 
-      // Anonymous feedback: create-only, never carries customer identity.
+      // ==========================================================
+      // FEEDBACK
+      // ==========================================================
+
       match /feedback/{feedbackId} {
-        allow create: if signedIn() && clientIsPublic(clientId)
-          && request.resource.data.keys().hasOnly(['clientId', 'message', 'rating', 'table', 'location', 'createdAt'])
+
+        allow create:
+          if signedIn()
+          && clientIsPublic(clientId)
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'message',
+            'rating',
+            'table',
+            'location',
+            'createdAt'
+          ])
           && request.resource.data.clientId == clientId
           && request.resource.data.message is string
-          && request.resource.data.message.size() >= 3 && request.resource.data.message.size() <= 2000
-          && (request.resource.data.rating == null
-              || (request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5))
-          && optStr(request.resource.data, 'table', 32)
-          && optStr(request.resource.data, 'location', 32)
+          && request.resource.data.message.size() >= 3
+          && request.resource.data.message.size() <= 2000
+          && (
+            request.resource.data.rating == null
+            || (
+              request.resource.data.rating is int
+              && request.resource.data.rating >= 1
+              && request.resource.data.rating <= 5
+            )
+          )
+          && optStr(
+            request.resource.data,
+            'table',
+            32
+          )
+          && optStr(
+            request.resource.data,
+            'location',
+            32
+          )
           && request.resource.data.createdAt == request.time;
-        allow read: if isStaffOf(clientId);
+
+        allow read:
+          if isStaffOf(clientId);
       }
 
-      // Review-generation activity: create-only, by the signed-in customer, for themselves.
+      // ==========================================================
+      // REVIEWS
+      // ==========================================================
+
       match /reviews/{reviewId} {
-        allow create: if signedIn() && clientIsPublic(clientId)
-          && request.resource.data.keys().hasOnly(['clientId', 'customerId', 'overallRating', 'staffRating', 'serviceRating',
-               'selectedItems', 'itemsTried', 'menuItemIds', 'generatedReview', 'provider', 'table', 'location', 'createdAt'])
+
+        allow create:
+          if signedIn()
+          && clientIsPublic(clientId)
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'customerId',
+            'overallRating',
+            'staffRating',
+            'serviceRating',
+            'selectedItems',
+            'itemsTried',
+            'menuItemIds',
+            'generatedReview',
+            'provider',
+            'table',
+            'location',
+            'createdAt'
+          ])
           && request.resource.data.clientId == clientId
           && request.resource.data.customerId == uid()
-          && request.resource.data.generatedReview is string && request.resource.data.generatedReview.size() <= 4000
-          && strList(request.resource.data.selectedItems, 20, 80)
-          && (!('itemsTried' in request.resource.data) || strList(request.resource.data.itemsTried, 20, 80))
-          && (!('menuItemIds' in request.resource.data) || strList(request.resource.data.menuItemIds, 20, 128))
-          && optStr(request.resource.data, 'overallRating', 40)
-          && optStr(request.resource.data, 'staffRating', 40)
-          && optStr(request.resource.data, 'serviceRating', 40)
-          && optStr(request.resource.data, 'provider', 16)
-          && optStr(request.resource.data, 'table', 32)
-          && optStr(request.resource.data, 'location', 32)
+          && request.resource.data.generatedReview is string
+          && request.resource.data.generatedReview.size() <= 4000
+          && strList(
+            request.resource.data.selectedItems,
+            20,
+            80
+          )
+          && (
+            !('itemsTried' in request.resource.data)
+            || strList(
+              request.resource.data.itemsTried,
+              20,
+              80
+            )
+          )
+          && (
+            !('menuItemIds' in request.resource.data)
+            || strList(
+              request.resource.data.menuItemIds,
+              20,
+              128
+            )
+          )
+          && optStr(
+            request.resource.data,
+            'overallRating',
+            40
+          )
+          && optStr(
+            request.resource.data,
+            'staffRating',
+            40
+          )
+          && optStr(
+            request.resource.data,
+            'serviceRating',
+            40
+          )
+          && optStr(
+            request.resource.data,
+            'provider',
+            16
+          )
+          && optStr(
+            request.resource.data,
+            'table',
+            32
+          )
+          && optStr(
+            request.resource.data,
+            'location',
+            32
+          )
           && request.resource.data.createdAt == request.time;
-        allow read: if isStaffOf(clientId);
+
+        allow read:
+          if isStaffOf(clientId);
       }
 
-      // Analytics: append-only (no update/delete except admin), minimal fields, server time.
+      // ==========================================================
+      // ANALYTICS EVENTS
+      // ==========================================================
+
       match /events/{eventId} {
-        allow create: if signedIn() && clientIsPublic(clientId)
-          && request.resource.data.keys().hasOnly(['clientId', 'eventType', 'timestamp', 'customerId', 'menuItemId', 'tableId', 'network'])
+
+        allow create:
+          if signedIn()
+          && clientIsPublic(clientId)
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'eventType',
+            'timestamp',
+            'customerId',
+            'menuItemId',
+            'tableId',
+            'network'
+          ])
           && request.resource.data.clientId == clientId
-          && request.resource.data.eventType in ['QR_OPENED', 'MENU_VIEWED', 'MENU_ITEM_VIEWED', 'GOOGLE_REVIEW_CLICKED',
-               'SOCIAL_CLICKED', 'WIFI_VIEWED', 'FEEDBACK_SUBMITTED', 'AI_REVIEW_GENERATED', 'LOYALTY_VIEWED']
+          && request.resource.data.eventType in [
+            'QR_OPENED',
+            'MENU_VIEWED',
+            'MENU_ITEM_VIEWED',
+            'GOOGLE_REVIEW_CLICKED',
+            'SOCIAL_CLICKED',
+            'WIFI_VIEWED',
+            'FEEDBACK_SUBMITTED',
+            'AI_REVIEW_GENERATED',
+            'LOYALTY_VIEWED'
+          ]
           && request.resource.data.timestamp == request.time
-          && (!('customerId' in request.resource.data) || request.resource.data.customerId == uid())
-          && optStr(request.resource.data, 'menuItemId', 128)
-          && optStr(request.resource.data, 'tableId', 32)
-          && optStr(request.resource.data, 'network', 32);
-        allow read: if isStaffOf(clientId);
+          && (
+            !('customerId' in request.resource.data)
+            || request.resource.data.customerId == uid()
+          )
+          && optStr(
+            request.resource.data,
+            'menuItemId',
+            128
+          )
+          && optStr(
+            request.resource.data,
+            'tableId',
+            32
+          )
+          && optStr(
+            request.resource.data,
+            'network',
+            32
+          );
+
+        allow read:
+          if isStaffOf(clientId);
       }
     }
 
-    // ── Loyalty (canonical, top-level) ───────────────────────────────────────
-    // loyaltyAccounts/{customerId} { clientId, customerId, stamps, ...reward fields }
+    // ============================================================
+    // LOYALTY ACCOUNTS
+    // ============================================================
+
     match /loyaltyAccounts/{customerId} {
-      allow get: if signedIn() && uid() == customerId;               // own account (works before it exists)
-      allow get: if isStaffOf(resource.data.get('clientId', ''));
-      allow list: if staffClientId() != '' && resource.data.clientId == staffClientId();
-      allow create: if signedIn() && uid() != customerId
-        && isStaffOf(request.resource.data.get('clientId', ''))
+
+      // Customer can read own loyalty account.
+      allow get:
+        if signedIn()
+        && uid() == customerId;
+
+      // Staff/admin can read their business.
+      allow get:
+        if isStaffOf(
+          resource.data.get('clientId', '')
+        );
+
+      allow list:
+        if staffClientId() != ''
+        && resource.data.clientId == staffClientId();
+
+      // Only staff/admin can create loyalty account.
+      allow create:
+        if signedIn()
+        && uid() != customerId
+        && isStaffOf(
+          request.resource.data.get('clientId', '')
+        )
         && request.resource.data.customerId == customerId
-        && request.resource.data.stamps is int && request.resource.data.stamps >= 0;
-      allow update: if signedIn() && uid() != customerId
-        && isStaffOf(resource.data.get('clientId', ''))
-        && request.resource.data.get('clientId', '') == resource.data.get('clientId', '')
+        && request.resource.data.stamps is int
+        && request.resource.data.stamps >= 0;
+
+      // Only staff/admin can update loyalty account.
+      allow update:
+        if signedIn()
+        && uid() != customerId
+        && isStaffOf(
+          resource.data.get('clientId', '')
+        )
+        && request.resource.data.get('clientId', '')
+            == resource.data.get('clientId', '')
         && request.resource.data.customerId == customerId
-        && request.resource.data.stamps is int && request.resource.data.stamps >= 0;
+        && request.resource.data.stamps is int
+        && request.resource.data.stamps >= 0;
     }
 
-    // ── Customers (UID = Firebase Anonymous Auth uid) ────────────────────────
-    // { uid, clientId, name, phone, normalizedPhone, phoneIndexId, email,
-    //   totalVisits, lastVisitAt, status, createdAt, updatedAt, qrToken }
+    // ============================================================
+    // CUSTOMERS
+    // ============================================================
+
     match /customers/{customerId} {
-      function d() { return request.resource.data; }
-      function changed() { return d().diff(resource.data).affectedKeys(); }
+
+      function d() {
+        return request.resource.data;
+      }
+
+      function changed() {
+        return d().diff(resource.data).affectedKeys();
+      }
+
       function oldVisits() {
-        return resource.data.get('totalVisits', 0) is int ? resource.data.get('totalVisits', 0) : 0;
+        return resource.data.get(
+          'totalVisits',
+          0
+        ) is int
+          ? resource.data.get('totalVisits', 0)
+          : 0;
       }
-      // After this commit, customerPhoneIndex/{indexId} belongs to this customer, same phone + business.
-      function ownsIndexAfter(indexId, clientId, phone) {
-        return getAfter(/databases/$(database)/documents/customerPhoneIndex/$(indexId)).data.customerId == customerId
-          && getAfter(/databases/$(database)/documents/customerPhoneIndex/$(indexId)).data.phone == phone
-          && getAfter(/databases/$(database)/documents/customerPhoneIndex/$(indexId)).data.clientId == clientId;
+
+      function ownsIndexAfter(
+        indexId,
+        clientId,
+        phone
+      ) {
+        return getAfter(
+          /databases/$(database)/documents/customerPhoneIndex/$(indexId)
+        ).data.customerId == customerId
+          && getAfter(
+            /databases/$(database)/documents/customerPhoneIndex/$(indexId)
+          ).data.phone == phone
+          && getAfter(
+            /databases/$(database)/documents/customerPhoneIndex/$(indexId)
+          ).data.clientId == clientId;
       }
+
       function visitTx(txId) {
         return /databases/$(database)/documents/clients/$(resource.data.clientId)/stampTransactions/$(txId);
       }
-      // The referenced stamp transaction must exist in THIS customer's business and
-      // belong to THIS customer (fields written by the Staff App: clientId, customerId).
+
       function visitTxBelongsToCustomer(txId) {
-        return exists(visitTx(txId))
-          && get(visitTx(txId)).data.get('customerId', '') == customerId
-          && get(visitTx(txId)).data.get('clientId', '') == resource.data.clientId;
+        return exists(
+          visitTx(txId)
+        )
+        && get(
+          visitTx(txId)
+        ).data.get('customerId', '') == customerId
+        && get(
+          visitTx(txId)
+        ).data.get('clientId', '') == resource.data.clientId;
       }
 
-      allow get: if signedIn() && uid() == customerId;
-      allow get: if isStaffOf(resource.data.get('clientId', ''));
-      // Staff query must filter clientId == own business.
-      allow list: if staffClientId() != '' && resource.data.clientId == staffClientId();
+      // ----------------------------------------------------------
+      // Customer own document
+      // ----------------------------------------------------------
 
-      // Registration: customers/{uid} + customerPhoneIndex/{phoneIndexId} + customerTokens/{token}
-      // in the same commit, all pointing at each other.
-      allow create: if signedIn() && uid() == customerId
-        && d().keys().hasOnly(['uid', 'clientId', 'name', 'phone', 'normalizedPhone', 'phoneIndexId', 'email',
-                               'totalVisits', 'lastVisitAt', 'status', 'createdAt', 'updatedAt', 'qrToken'])
-        && d().keys().hasAll(['uid', 'clientId', 'name', 'phone', 'normalizedPhone', 'phoneIndexId',
-                              'totalVisits', 'lastVisitAt', 'status', 'createdAt', 'updatedAt', 'qrToken'])
+      allow get:
+        if signedIn()
+        && uid() == customerId;
+
+      // Staff/admin own business.
+      allow get:
+        if isStaffOf(
+          resource.data.get('clientId', '')
+        );
+
+      allow list:
+        if staffClientId() != ''
+        && resource.data.clientId == staffClientId();
+
+      // ----------------------------------------------------------
+      // CUSTOMER REGISTRATION
+      // ----------------------------------------------------------
+
+      allow create:
+        if signedIn()
+        && uid() == customerId
+
+        && d().keys().hasOnly([
+          'uid',
+          'clientId',
+          'name',
+          'phone',
+          'normalizedPhone',
+          'phoneIndexId',
+          'email',
+          'totalVisits',
+          'lastVisitAt',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'qrToken'
+        ])
+
+        && d().keys().hasAll([
+          'uid',
+          'clientId',
+          'name',
+          'phone',
+          'normalizedPhone',
+          'phoneIndexId',
+          'email',
+          'totalVisits',
+          'lastVisitAt',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'qrToken'
+        ])
+
         && d().uid == customerId
         && d().status == 'active'
         && d().totalVisits == 0
         && d().lastVisitAt == null
+
         && validName(d().name)
-        && validPhone(d().normalizedPhone) && d().phone == d().normalizedPhone
-        && validEmail(d().get('email', null))
-        && clientIsPublic(d().clientId)
-        && d().phoneIndexId == phoneKey(d().clientId, d().normalizedPhone)
-        && ownsIndexAfter(d().phoneIndexId, d().clientId, d().normalizedPhone)
-        && tokenAfterMatches(d().qrToken, customerId, d().clientId)
-        && d().createdAt == request.time && d().updatedAt == request.time;
 
-      // Customer profile edit — only name / phone / normalizedPhone / phoneIndexId / email /
-      // updatedAt / one-time qrToken. Phone fields change only as an atomic index move
-      // (claim new entry, release old one). uid, clientId, totalVisits, lastVisitAt,
-      // status and createdAt can never be changed by the customer.
-      allow update: if signedIn() && uid() == customerId
-        && changed().hasOnly(['name', 'phone', 'normalizedPhone', 'phoneIndexId', 'email', 'updatedAt', 'qrToken'])
+        && validPhone(d().normalizedPhone)
+        && d().phone == d().normalizedPhone
+
+        && validEmail(
+          d().get('email', null)
+        )
+
+        && clientIsPublic(
+          d().clientId
+        )
+
+        && d().phoneIndexId
+          == phoneKey(
+            d().clientId,
+            d().normalizedPhone
+          )
+
+        && ownsIndexAfter(
+          d().phoneIndexId,
+          d().clientId,
+          d().normalizedPhone
+        )
+
+        && tokenAfterMatches(
+          d().qrToken,
+          customerId,
+          d().clientId
+        )
+
+        && d().createdAt == request.time
+        && d().updatedAt == request.time;
+
+      // ----------------------------------------------------------
+      // CUSTOMER PROFILE UPDATE
+      // ----------------------------------------------------------
+
+      allow update:
+        if signedIn()
+        && uid() == customerId
+
+        && changed().hasOnly([
+          'name',
+          'phone',
+          'normalizedPhone',
+          'phoneIndexId',
+          'email',
+          'updatedAt',
+          'qrToken'
+        ])
+
         && d().updatedAt == request.time
-        && validName(d().name) && validEmail(d().get('email', null))
-        && (!changed().hasAny(['phone', 'normalizedPhone', 'phoneIndexId']) || (
-              validPhone(d().normalizedPhone) && d().phone == d().normalizedPhone
-              && d().phoneIndexId == phoneKey(resource.data.clientId, d().normalizedPhone)
-              && ownsIndexAfter(d().phoneIndexId, resource.data.clientId, d().normalizedPhone)
-              && (resource.data.get('phoneIndexId', null) == null
-                  || resource.data.phoneIndexId == d().phoneIndexId
-                  || !existsAfter(/databases/$(database)/documents/customerPhoneIndex/$(resource.data.phoneIndexId)))))
-        && (!changed().hasAny(['qrToken'])
-            || (!('qrToken' in resource.data) && tokenAfterMatches(d().qrToken, customerId, resource.data.clientId)));
 
-      // Staff visit: exactly +1 at server time, referencing an existing, UNCOUNTED
-      // clients/{customer.clientId}/stampTransactions/{id} that belongs to this customer
-      // and is flagged visitCounted in the same commit.
-      allow update: if signedIn() && uid() != customerId
-        && isStaffOf(resource.data.get('clientId', ''))
-        && changed().hasOnly(['totalVisits', 'lastVisitAt', 'updatedAt', 'lastVisitTransactionId'])
-        && d().totalVisits == oldVisits() + 1
-        && d().lastVisitAt == request.time && d().updatedAt == request.time
+        && validName(d().name)
+
+        && validEmail(
+          d().get('email', null)
+        )
+
+        // Phone change requires atomic phone index movement.
+        && (
+          !changed().hasAny([
+            'phone',
+            'normalizedPhone',
+            'phoneIndexId'
+          ])
+
+          || (
+            validPhone(d().normalizedPhone)
+            && d().phone == d().normalizedPhone
+            && d().phoneIndexId
+              == phoneKey(
+                resource.data.clientId,
+                d().normalizedPhone
+              )
+
+            && ownsIndexAfter(
+              d().phoneIndexId,
+              resource.data.clientId,
+              d().normalizedPhone
+            )
+
+            && (
+              resource.data.get(
+                'phoneIndexId',
+                null
+              ) == null
+
+              || resource.data.phoneIndexId
+                == d().phoneIndexId
+
+              || !existsAfter(
+                /databases/$(database)/documents/customerPhoneIndex/$(resource.data.phoneIndexId)
+              )
+            )
+          )
+        )
+
+        // QR token can only be added once.
+        && (
+          !changed().hasAny(['qrToken'])
+          || (
+            !('qrToken' in resource.data)
+            && tokenAfterMatches(
+              d().qrToken,
+              customerId,
+              resource.data.clientId
+            )
+          )
+        );
+
+      // ----------------------------------------------------------
+      // STAFF VISIT COUNTING
+      // ----------------------------------------------------------
+
+      allow update:
+        if signedIn()
+        && uid() != customerId
+
+        && isStaffOf(
+          resource.data.get('clientId', '')
+        )
+
+        && changed().hasOnly([
+          'totalVisits',
+          'lastVisitAt',
+          'updatedAt',
+          'lastVisitTransactionId'
+        ])
+
+        && d().totalVisits
+          == oldVisits() + 1
+
+        && d().lastVisitAt == request.time
+        && d().updatedAt == request.time
+
         && d().lastVisitTransactionId is string
-        && visitTxBelongsToCustomer(d().lastVisitTransactionId)
-        && get(visitTx(d().lastVisitTransactionId)).data.get('visitCounted', false) != true
-        && getAfter(visitTx(d().lastVisitTransactionId)).data.get('visitCounted', false) == true;
+
+        // Transaction must belong to this customer and business.
+        && visitTxBelongsToCustomer(
+          d().lastVisitTransactionId
+        )
+
+        // Transaction was uncounted before this atomic write.
+        && get(
+          visitTx(
+            d().lastVisitTransactionId
+          )
+        ).data.get(
+          'visitCounted',
+          false
+        ) != true
+
+        // Transaction becomes counted in the same atomic commit.
+        && getAfter(
+          visitTx(
+            d().lastVisitTransactionId
+          )
+        ).data.get(
+          'visitCounted',
+          false
+        ) == true;
     }
 
-    // ── Phone index: ONE normalized phone per business ───────────────────────
-    // customerPhoneIndex/{clientId}_{digits}  { phone, clientId, customerId, createdAt, updatedAt }
+    // ============================================================
+    // CUSTOMER PHONE INDEX
+    // ============================================================
+
     match /customerPhoneIndex/{phoneIndexId} {
-      function d() { return request.resource.data; }
-      function ownerAfter() { return getAfter(/databases/$(database)/documents/customers/$(uid())).data; }
 
-      allow get: if signedIn() && resource.data.customerId == uid();   // owner only — no enumeration
-      allow get: if isStaffOf(resource.data.get('clientId', ''));
+      function d() {
+        return request.resource.data;
+      }
 
-      // Create-only (never overwritten) and only together with the owner's
-      // customers/{uid} pointing at this exact id — no bare entries.
-      allow create: if signedIn()
-        && d().keys().hasOnly(['phone', 'clientId', 'customerId', 'createdAt', 'updatedAt'])
+      function ownerAfter() {
+        return getAfter(
+          /databases/$(database)/documents/customers/$(uid())
+        ).data;
+      }
+
+      // Owner only.
+      allow get:
+        if signedIn()
+        && resource.data.customerId == uid();
+
+      // Staff/admin only for their business.
+      allow get:
+        if isStaffOf(
+          resource.data.get('clientId', '')
+        );
+
+      // ----------------------------------------------------------
+      // CREATE
+      // ----------------------------------------------------------
+
+      allow create:
+        if signedIn()
+
+        && d().keys().hasOnly([
+          'phone',
+          'clientId',
+          'customerId',
+          'createdAt',
+          'updatedAt'
+        ])
+
         && d().customerId == uid()
+
         && validPhone(d().phone)
-        && clientIsPublic(d().clientId)
-        && phoneIndexId == phoneKey(d().clientId, d().phone)
-        && ownerAfter().phoneIndexId == phoneIndexId
-        && ownerAfter().normalizedPhone == d().phone
-        && ownerAfter().clientId == d().clientId
-        && d().createdAt == request.time && d().updatedAt == request.time;
 
-      // Released only by its owner while moving to a different phone (same commit).
-      allow delete: if signedIn() && resource.data.customerId == uid()
-        && ownerAfter().get('phoneIndexId', '') != phoneIndexId;
+        && clientIsPublic(
+          d().clientId
+        )
+
+        && phoneIndexId
+          == phoneKey(
+            d().clientId,
+            d().phone
+          )
+
+        && ownerAfter().phoneIndexId
+          == phoneIndexId
+
+        && ownerAfter().normalizedPhone
+          == d().phone
+
+        && ownerAfter().clientId
+          == d().clientId
+
+        && d().createdAt == request.time
+        && d().updatedAt == request.time;
+
+      // ----------------------------------------------------------
+      // DELETE DURING ATOMIC PHONE CHANGE
+      // ----------------------------------------------------------
+
+      allow delete:
+        if signedIn()
+        && resource.data.customerId == uid()
+        && ownerAfter().get(
+          'phoneIndexId',
+          ''
+        ) != phoneIndexId;
     }
 
-    // ── Customer QR tokens (opaque token → customer uid + business) ──────────
-    // customerTokens/{token} { customerId, clientId, createdAt }
+    // ============================================================
+    // CUSTOMER QR TOKENS
+    // ============================================================
+
     match /customerTokens/{token} {
-      // Only together with the owner's customers/{uid}.qrToken == token, same business.
-      allow create: if signedIn() && token.matches('^[a-f0-9]{64}$')
-        && request.resource.data.keys().hasOnly(['customerId', 'clientId', 'createdAt'])
+
+      // Created atomically with customers/{uid}.
+      allow create:
+        if signedIn()
+
+        && token.matches(
+          '^[a-f0-9]{64}$'
+        )
+
+        && request.resource.data.keys().hasOnly([
+          'customerId',
+          'clientId',
+          'createdAt'
+        ])
+
         && request.resource.data.customerId == uid()
+
         && request.resource.data.clientId is string
-        && getAfter(/databases/$(database)/documents/customers/$(uid())).data.qrToken == token
-        && getAfter(/databases/$(database)/documents/customers/$(uid())).data.clientId == request.resource.data.clientId
-        && request.resource.data.createdAt == request.time;
-      allow get: if signedIn() && resource.data.customerId == uid();   // own token
-      allow get: if isStaffOf(resource.data.get('clientId', ''));      // staff: own business's QR only
+        && request.resource.data.clientId != ''
+
+        && getAfter(
+          /databases/$(database)/documents/customers/$(uid())
+        ).data.qrToken == token
+
+        && getAfter(
+          /databases/$(database)/documents/customers/$(uid())
+        ).data.clientId
+          == request.resource.data.clientId
+
+        && request.resource.data.createdAt
+          == request.time;
+
+      // Customer can read own QR token.
+      allow get:
+        if signedIn()
+        && resource.data.customerId == uid();
+
+      // Staff can resolve QR only for their own business.
+      allow get:
+        if isStaffOf(
+          resource.data.get('clientId', '')
+        );
     }
 
-    // activityLogs/{id}, metricsDaily/{id}, customerMergeArchive/{id} and any other
-    // collection: admin only (catch-all above).
+    // ============================================================
+    // OTHER COLLECTIONS
+    // ============================================================
+    //
+    // activityLogs
+    // metricsDaily
+    // customerMergeArchive
+    // and all other unspecified collections
+    //
+    // are ADMIN ONLY through the catch-all admin rule above.
+    //
   }
 }
