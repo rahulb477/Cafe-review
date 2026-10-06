@@ -280,7 +280,7 @@ function ThemePreview({ config }: { config: ClientConfig }) {
 }
 
 function UsagePanel({ clients, price }: { clients: ClientConfig[]; price: number }) {
-  const [data, setData] = useState<{ realAIConfigured: boolean; usage: UsageRow[] } | null>(null);
+  const [data, setData] = useState<{ realAIConfigured: boolean; usage: UsageRow[]; usageStore?: string } | null>(null);
   const [error, setError] = useState(false);
   useEffect(() => {
     fetch("/api/admin/usage")
@@ -296,6 +296,9 @@ function UsagePanel({ clients, price }: { clients: ClientConfig[]; price: number
       <p className="text-sm text-slate-500">
         Add-on price: ₹{price}/month per client (billing not connected). Real AI provider:{" "}
         {data ? (data.realAIConfigured ? <b className="text-emerald-600">configured</b> : <b className="text-amber-600">not configured — Mock provider in use</b>) : "…"}
+      </p>
+      <p className="mt-1 text-xs text-slate-400">
+        Firebase-only app (no database) — counters are held in server memory and reset when the app redeploys.
       </p>
       {error && <p className="mt-3 text-sm text-red-600">Couldn&apos;t load usage.</p>}
       <div className="mt-4 overflow-x-auto">
