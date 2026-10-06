@@ -15,13 +15,15 @@ One codebase → unlimited branded café/restaurant apps at `/<clientSlug>`
 - `src/config/clients.ts` – client registry (V1 local data source)
 - `src/services/clientService.ts` – the only accessor for client configs (swap for Supabase/Firebase/REST)
 - `src/services/*` – menu, loyalty, feedback, social, wifi, qr, review, aiReview (all client-scoped)
-- `src/server/ai/*` – `MockAIProvider` / `RealAIProvider` (OpenAI-compatible) + per-client monthly usage (`ai_usage` table)
+- `src/server/ai/*` – `MockAIProvider` / `RealAIProvider` (OpenAI-compatible) + per-client monthly usage counters (in-memory, no database)
 - `src/store/clientStore.ts` – per-client session, persisted under `qrapp:{slug}:{key}`
 - `src/lib/theme.ts` + `globals.css` – client theme → CSS variables → Tailwind tokens (`primary`, `accent`, `canvas`, …)
 - `src/config/platform.ts` – `AI_MONTHLY_PRICE`, default client, reserved slugs, app URL, admin gate
 
 ## Environment
-See `.env.example`. AI keys are server-only; without `AI_API_KEY` the mock provider is used.
+See `.env.example`. **No database env vars are required** — there is no `DATABASE_URL`, PostgreSQL or Drizzle
+in this app, and `npm run build` succeeds without any of them. Firebase public config uses `NEXT_PUBLIC_FIREBASE_*`.
+AI keys are server-only; without `AI_API_KEY` the mock provider is used.
 `/admin` is available outside production, or in production with `ADMIN_ENABLED=true`.
 
 ## Firebase backend (project `cafe-review7`)
@@ -37,7 +39,9 @@ See `.env.example`. AI keys are server-only; without `AI_API_KEY` the mock provi
 
 - Server resolves tenants via Firestore REST (ISR 60s); the browser keeps config + menu live with `onSnapshot`.
 - Customer identity = Firebase Anonymous Auth (enable it in Firebase console → Authentication → Sign-in method).
-- Firebase tenants write to Firestore and fall back to the server API (Postgres) if Firestore/Auth is unavailable.
+- Customer App is **Firebase-only**: no PostgreSQL, no Drizzle, no `DATABASE_URL` (builds and deploys with zero database env vars).
+  Feedback/reviews are written to Firestore by the browser SDK; `/api/feedback` and `/api/reviews` are Firebase-only
+  compatibility shims for bundled demo tenants (they never touch a database). AI usage counters live in process memory.
 - Services: `src/services/firebase/*` (single init in `firebaseClient.ts`, config + project guard in `firebaseConfig.ts`).
 - Rules: `firebase/firestore.rules`, `firebase/storage.rules`, `firebase/database.rules.json`
   → merge with the Admin App's rules, then `firebase deploy --only firestore:rules,storage,database`.

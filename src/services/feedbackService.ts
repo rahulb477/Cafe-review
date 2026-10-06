@@ -1,5 +1,6 @@
 import type { ClientConfig } from "@/types/client";
 import { addFeedback } from "./firebase/feedbackService";
+import { firebaseEnabled } from "./firebase/firebaseConfig";
 
 export interface FeedbackPayload {
   message: string;
@@ -18,11 +19,13 @@ function sanitize(p: FeedbackPayload) {
 }
 
 /**
- * Anonymous feedback.
- *  • Firebase tenants → Firestore ONLY (clients/{clientId}/feedback). Firebase is
- *    the source of truth, so there is no silent fallback; failures surface to the
- *    customer as a retryable error. clientId comes from the server-resolved tenant.
- *  • Bundled demo tenants (not in Firebase) → existing server API.
+ * Anonymous feedback — Firestore is the source of truth (Firebase-only app).
+ *  • Firebase tenants → Firestore ONLY (clients/{clientId}/feedback). There is no
+ *    silent fallback; failures surface to the customer as a retryable error.
+ *    clientId comes from the server-resolved tenant.
+ *  • Bundled demo tenants (not in Firebase) → Firestore is attempted first (it
+ *    works whenever the tenant exists and is published); otherwise the
+ *    Firebase-only compatibility route acknowledges the submission.
  */
 export async function submitFeedback(client: ClientConfig, payload: FeedbackPayload): Promise<{ ok: true }> {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -31,13 +34,13 @@ export async function submitFeedback(client: ClientConfig, payload: FeedbackPayl
   const data = sanitize(payload);
   if (data.message.length < 3) throw new Error("Please tell us a little more (at least 3 characters).");
 
-  if (client.source === "firebase") {
+  if (client.source === "firebase" || firebaseEnabled) {
     try {
       await addFeedback(client.id, data);
       return { ok: true };
     } catch (e) {
       console.warn("[feedback] Firestore write failed:", (e as { code?: string })?.code ?? (e instanceof Error ? e.message : e));
-      throw new Error(FRIENDLY_ERROR);
+      if (client.source === "firebase") throw new Error(FRIENDLY_ERROR);
     }
   }
 
