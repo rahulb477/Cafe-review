@@ -37,6 +37,12 @@ export interface ClientSessionState {
   /** Customer name + mobile (Firebase: customers/{uid}; demo tenants: this device). */
   profile: CustomerProfile | null;
   profileStatus: ProfileStatus;
+  /**
+   * Menu items the customer hearted on the Menu screen. Device-local only
+   * (namespaced like everything else) — never written to Firestore, so no
+   * schema/rules change and no effect on loyalty or profiles.
+   */
+  favorites: string[];
   /** Runtime Firebase diagnostic chain (no secrets). */
   diag: FirebaseDiagnostics;
 
@@ -46,6 +52,8 @@ export interface ClientSessionState {
   setLoyalty: (l: { stamps?: number; rewardStatus?: string | null; status: LoyaltySyncStatus }) => void;
   retrySync: () => void;
   setProfile: (profile: CustomerProfile | null, status: ProfileStatus) => void;
+  /** Heart/un-heart a menu item (device-local favourites). */
+  toggleFavorite: (menuItemId: string) => void;
   patchDiag: (patch: Partial<FirebaseDiagnostics>) => void;
   /** Demo (non-Firebase) tenants only: keep the profile on this device. */
   saveLocalProfile: (profile: CustomerProfile) => void;
@@ -100,6 +108,7 @@ export function createClientStore(clientId: string, clientSlug: string) {
     customer: storageKey(clientSlug, "customer"),
     session: storageKey(clientSlug, "session"),
     localProfile: storageKey(clientSlug, "profile"),
+    favorites: storageKey(clientSlug, "favorites"),
   };
 
   const store = createStore<ClientSessionState>()((set, get) => ({
@@ -119,6 +128,7 @@ export function createClientStore(clientId: string, clientSlug: string) {
     syncAttempt: 0,
     profile: null,
     profileStatus: "idle",
+    favorites: [],
     diag: initialDiagnostics(),
 
     hydrate: () => {
@@ -139,6 +149,7 @@ export function createClientStore(clientId: string, clientSlug: string) {
           selectedItemIds: Array.isArray(stored.selectedItemIds) ? stored.selectedItemIds.filter((x): x is string => typeof x === "string") : [],
         },
         generatedReview: read<string | null>(k.generated, null),
+        favorites: read<string[]>(k.favorites, []).filter((x): x is string => typeof x === "string"),
       });
     },
 
@@ -168,6 +179,10 @@ export function createClientStore(clientId: string, clientSlug: string) {
       set((s) => ({ stamps: stamps ?? s.stamps, rewardStatus: rewardStatus !== undefined ? rewardStatus : s.rewardStatus, loyaltyStatus: status })),
     retrySync: () => set((s) => ({ syncAttempt: s.syncAttempt + 1, loyaltyStatus: "connecting", profileStatus: s.profile ? "ready" : "loading" })),
     setProfile: (profile, profileStatus) => set({ profile, profileStatus }),
+    toggleFavorite: (menuItemId) =>
+      set((s) => ({
+        favorites: s.favorites.includes(menuItemId) ? s.favorites.filter((id) => id !== menuItemId) : [...s.favorites, menuItemId],
+      })),
     patchDiag: (patch) => set((s) => ({ diag: { ...s.diag, ...patch } })),
     saveLocalProfile: (profile) => {
       write(k.localProfile, profile);
@@ -180,6 +195,7 @@ export function createClientStore(clientId: string, clientSlug: string) {
     if (!s.hydrated) return;
     if (s.review !== prev.review) write(k.review, s.review);
     if (s.generatedReview !== prev.generatedReview) write(k.generated, s.generatedReview);
+    if (s.favorites !== prev.favorites) write(k.favorites, s.favorites);
     if (s.customerId !== prev.customerId && !s.authUid) write(k.customer, { customerId: s.customerId });
     if (s.tableNumber !== prev.tableNumber || s.location !== prev.location)
       write(k.session, { tableNumber: s.tableNumber, location: s.location });
