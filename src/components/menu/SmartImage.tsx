@@ -24,6 +24,7 @@ interface Props {
  */
 export function SmartImage({ src, alt, emoji, sizes, priority, className = "", imgClassName = "", emojiClassName = "text-3xl", fallback = "emoji" }: Props) {
   const [state, setState] = useState<"loading" | "loaded" | "error">(src ? "loading" : "error");
+  // The fallback is a flat, brand-tinted tile — no gradients, never a broken-image icon.
 
   return (
     <div className={`relative isolate overflow-hidden bg-secondary ${className}`}>
@@ -41,11 +42,11 @@ export function SmartImage({ src, alt, emoji, sizes, priority, className = "", i
           className={`object-cover transition-[opacity,scale] duration-500 ease-out ${state === "loaded" ? "opacity-100" : "opacity-0"} ${imgClassName}`}
         />
       ) : (
-        <div role="img" aria-label={alt} className="absolute inset-0 grid place-items-center bg-gradient-to-br from-secondary to-accent/25">
+        <div role="img" aria-label={alt} className="absolute inset-0 grid place-items-center bg-secondary">
           {fallback === "neutral" ? (
-            <Utensils width={22} height={22} className="text-primary/45" aria-hidden />
+            <Utensils width={22} height={22} className="text-primary/40" aria-hidden />
           ) : (
-            <span className={`drop-shadow-sm ${emojiClassName}`} aria-hidden>
+            <span className={emojiClassName} aria-hidden>
               {emoji ?? "🍽️"}
             </span>
           )}

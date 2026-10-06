@@ -7,34 +7,56 @@ import { MenuItemCard, MenuItemCardSkeleton } from "@/components/MenuItemCard";
 import { StatusScreen } from "@/components/StatusScreen";
 import { useClient, useClientHref } from "@/components/ClientProvider";
 import { getMenu, getCategories, getItemSlug } from "@/services/menuService";
+import type { ClientConfig } from "@/types/client";
 import type { MenuItem } from "@/types/menu";
 import { trackEvent } from "@/services/firebase/analyticsService";
+import { Utensils } from "@/components/icons";
+
+/** Used only when the tenant has no description in Firebase. */
+const INTRO_FALLBACK = "Small-batch favourites, made with a little more care.";
 
 export default function MenuPage() {
+  const client = useClient();
+
   return (
     <div className="flex flex-col">
-      <ScreenHeader title="Our Menu" backPath="/" />
-      <Suspense fallback={<MenuListSkeleton />}>
+      {/* Existing customer app header (back + drawer), unchanged. */}
+      <ScreenHeader backPath="/" />
+
+      {/* Editorial intro — rendered from the tenant config, no hardcoded branding. */}
+      <header className="px-5 pb-7 pt-2 md:px-6 md:pb-9">
+        <p className="text-[10.5px] font-semibold uppercase tracking-[0.24em] text-muted">Fresh from the counter</p>
+        <h1 className="mt-3 font-display text-[2.15rem] font-normal leading-[1.05] tracking-tight text-primary md:text-[2.75rem]">Our menu</h1>
+        <p className="mt-3 max-w-md text-[13.5px] leading-relaxed text-muted">{client.description?.trim() || INTRO_FALLBACK}</p>
+      </header>
+
+      <Suspense fallback={<MenuBodySkeleton />}>
         <MenuContent />
       </Suspense>
     </div>
   );
 }
 
-function MenuListSkeleton() {
+/** Loading state in the exact shape of the menu: pills + editorial cards. */
+function MenuBodySkeleton() {
   return (
-    <div className="px-4 py-3">
-      <div className="mb-4 flex gap-2 overflow-hidden">
-        {[56, 72, 88, 64, 60].map((w, i) => (
-          <div key={i} className="skeleton h-10 shrink-0 rounded-full" style={{ width: w }} />
-        ))}
+    <>
+      <div className="sticky z-10 border-b border-primary/10 bg-canvas/95 backdrop-blur-md" style={{ top: "calc(var(--safe-top) + 60px)" }}>
+        <div className="flex gap-2 overflow-hidden px-4 py-3 md:px-6" aria-hidden>
+          {[52, 74, 88, 62, 66].map((w, i) => (
+            <div key={i} className="skeleton h-9 shrink-0 rounded-full" style={{ width: w }} />
+          ))}
+        </div>
       </div>
-      <div className="grid gap-3 md:grid-cols-2" aria-label="Loading menu">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <MenuItemCardSkeleton key={i} />
-        ))}
+      <div className="px-4 pb-4 pt-5 md:px-6 md:pt-6" role="status">
+        <span className="sr-only">Loading menu</span>
+        <div className="grid gap-3.5 sm:grid-cols-2 md:gap-5 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <MenuItemCardSkeleton key={i} />
+          ))}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -83,12 +105,15 @@ function MenuContent() {
     <>
       <CategoryBar categories={categories} active={active} onSelect={select} />
 
-      <div className="px-4 pb-6 pt-2">
+      <div className="px-4 pb-4 pt-5 md:px-6 md:pt-6">
         {!items && !error && (
-          <div className="grid gap-3 md:grid-cols-2" aria-label="Loading menu">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <MenuItemCardSkeleton key={i} />
-            ))}
+          <div role="status">
+            <span className="sr-only">Loading menu</span>
+            <div className="grid gap-3.5 sm:grid-cols-2 md:gap-5 lg:grid-cols-3">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <MenuItemCardSkeleton key={i} />
+              ))}
+            </div>
           </div>
         )}
 
@@ -109,14 +134,15 @@ function MenuContent() {
 
         {items && (
           <>
-            <div className="mb-3 flex items-baseline justify-between px-1">
-              <h2 className="font-display text-lg font-bold text-primary">{active === "All" ? "Everything" : active}</h2>
-              <span className="text-xs font-medium text-muted" aria-live="polite">
+            <div className="mb-4 flex items-baseline justify-between gap-3">
+              <h2 className="text-[10.5px] font-semibold uppercase tracking-[0.24em] text-muted">{active === "All" ? "The full menu" : active}</h2>
+              <span className="text-[10.5px] font-medium uppercase tracking-[0.14em] text-muted" aria-live="polite">
                 {filtered.length} {filtered.length === 1 ? "item" : "items"}
               </span>
             </div>
+
             {filtered.length > 0 ? (
-              <div key={active} className="grid gap-3 md:grid-cols-2">
+              <div key={active} className="grid gap-3.5 sm:grid-cols-2 md:gap-5 lg:grid-cols-3">
                 {filtered.map((item, i) => {
                   const slug = getItemSlug(item);
                   const to = href(`/menu/${slug}`) + (active !== "All" ? `?from=${encodeURIComponent(active)}` : "");
@@ -124,12 +150,14 @@ function MenuContent() {
                 })}
               </div>
             ) : (
-              <div className="flex flex-col items-center rounded-3xl bg-surface px-6 py-12 text-center shadow-card">
-                <span className="text-4xl" aria-hidden>
-                  🍽️
+              <div className="flex flex-col items-center rounded-xl border border-primary/10 bg-surface px-6 py-14 text-center">
+                <span className="grid h-12 w-12 place-items-center rounded-full border border-primary/10 text-primary/40" aria-hidden>
+                  <Utensils width={20} height={20} />
                 </span>
-                <p className="mt-3 font-semibold text-primary">Nothing here yet</p>
-                <p className="mt-1 text-sm text-muted">Try another category — there&apos;s plenty more to explore.</p>
+                <p className="mt-4 font-display text-lg text-primary">Nothing here yet</p>
+                <p className="mt-1.5 max-w-xs text-[13px] leading-relaxed text-muted">
+                  {active === "All" ? "Our menu is being updated — please check back in a moment." : `We're still plating up our ${active} selection — try another category in the meantime.`}
+                </p>
               </div>
             )}
           </>
@@ -139,6 +167,11 @@ function MenuContent() {
   );
 }
 
+/**
+ * Horizontal category selector: dark filled pill for the active category,
+ * cream bordered pills for the rest. Scrolls on mobile (scrollbar hidden),
+ * keeps tab semantics + arrow-key navigation, and the active chip in view.
+ */
 function CategoryBar({ categories, active, onSelect }: { categories: string[]; active: string; onSelect: (c: string) => void }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const indicatorRef = useRef<HTMLSpanElement>(null);
@@ -179,16 +212,16 @@ function CategoryBar({ categories, active, onSelect }: { categories: string[]; a
   };
 
   return (
-    <div className="sticky z-10 border-b border-primary/5 bg-canvas/95 pb-3 pt-1 backdrop-blur-md" style={{ top: "calc(var(--safe-top) + 60px)" }}>
+    <div className="sticky z-10 border-b border-primary/10 bg-canvas/95 backdrop-blur-md" style={{ top: "calc(var(--safe-top) + 60px)" }}>
       <div
         ref={scrollerRef}
-        className="no-scrollbar overflow-x-auto [mask-image:linear-gradient(to_right,transparent,black_12px,black_calc(100%-12px),transparent)]"
+        className="no-scrollbar overflow-x-auto [mask-image:linear-gradient(to_right,transparent,black_14px,black_calc(100%-14px),transparent)]"
       >
-        <div role="tablist" aria-label="Menu categories" onKeyDown={onKeyDown} className="relative flex w-max gap-2 px-4 py-0.5">
+        <div role="tablist" aria-label="Menu categories" onKeyDown={onKeyDown} className="relative flex w-max gap-2 px-4 py-3 md:px-6">
           <span
             ref={indicatorRef}
             aria-hidden
-            className="absolute bottom-0.5 left-0 top-0.5 rounded-full bg-primary opacity-0 shadow-md shadow-primary/25 transition-[transform,width] duration-300 ease-out"
+            className="absolute bottom-3 left-0 top-3 rounded-full bg-primary opacity-0 transition-[transform,width] duration-300 ease-out"
           />
           {categories.map((cat) => {
             const isActive = cat === active;
@@ -203,8 +236,10 @@ function CategoryBar({ categories, active, onSelect }: { categories: string[]; a
                 aria-selected={isActive}
                 tabIndex={isActive ? 0 : -1}
                 onClick={() => onSelect(cat)}
-                className={`press relative z-10 h-10 shrink-0 whitespace-nowrap rounded-full px-4 text-sm font-semibold transition-colors duration-300 ${
-                  isActive ? "text-canvas" : "bg-surface/70 text-primary-mid ring-1 ring-primary/10 hover:text-primary hover:ring-primary/25"
+                className={`press relative z-10 h-9 shrink-0 whitespace-nowrap rounded-full px-4 text-[13px] transition-colors duration-300 ${
+                  isActive
+                    ? "font-medium text-canvas"
+                    : "bg-secondary/70 font-medium text-primary/80 ring-1 ring-primary/10 hover:text-primary hover:ring-primary/25"
                 }`}
               >
                 {cat}
