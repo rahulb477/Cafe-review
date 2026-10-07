@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.turbo/
+coverage/
+build/
+dist/
+out/
+*.tsbuildinfo
+npm-debug.log*
+.env
+.env.*
+!.env.example

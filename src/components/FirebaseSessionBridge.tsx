@@ -4,7 +4,9 @@ import { useEffect } from "react";
 import { useClient, useSession } from "./ClientProvider";
 import { ensureCustomer } from "@/services/firebase/authService";
 import { ensureCustomerToken, getCustomer } from "@/services/firebase/customerService";
-import { subscribeLoyalty } from "@/services/firebase/loyaltyService";
+import { subscribeLoyalty, subscribeStampHistory, type CustomerStampHistory } from "@/services/firebase/loyaltyService";
+import type { LoyaltyAccount } from "@/types/loyalty";
+import { parseFirestoreTimestamp } from "@/shared/firestoreTimestamp";
 import { trackEvent } from "@/services/firebase/analyticsService";
 import { readLocalProfile } from "@/store/clientStore";
 import { errorCode } from "@/services/firebase/diagnostics";
@@ -39,7 +41,10 @@ export function FirebaseSessionBridge() {
       return;
     }
     let cancelled = false;
-    let unsub: (() => void) | undefined;
+    let unsubLoyalty: (() => void) | undefined;
+    let unsubStampHistory: (() => void) | undefined;
+    let loyaltyAccount: LoyaltyAccount | null = null;
+    let stampHistory: CustomerStampHistory | null = null;
     setLoyalty({ status: "connecting" });
 
     (async () => {
@@ -64,21 +69,85 @@ export function FirebaseSessionBridge() {
       const loyaltyPath = `${LOYALTY_COLLECTION}/${uid}`;
       console.info("[diag] Firestore loyalty listener →", loyaltyPath);
       patchDiag({ loyalty: { status: "pending", path: loyaltyPath }, profile: { status: "pending", path: `customers/${uid}` } });
-      unsub = subscribeLoyalty(
+      const publishLoyaltyState = () => {
+        if (cancelled || !loyaltyAccount) return;
+        if (!loyaltyAccount.belongsToClient) {
+          console.warn("[loyalty] loyaltyAccounts doc belongs to another business; hiding its values.");
+          setLoyalty({
+            stamps: 0,
+            currentStamps: 0,
+            lifetimeStamps: null,
+            rewardsEarned: null,
+            rewardsRedeemed: null,
+            lastStampAt: null,
+            loyaltyAccountExists: false,
+            stampHistoryCount: null,
+            stampHistoryLatestAt: null,
+            rewardStatus: null,
+            status: "live",
+          });
+          return;
+        }
+
+        const accountDate = parseFirestoreTimestamp(loyaltyAccount.lastStampAt);
+        const historyDate = stampHistory?.latestStampAt ?? null;
+        const lastStampAt = accountDate && historyDate
+          ? accountDate.getTime() >= historyDate.getTime() ? loyaltyAccount.lastStampAt : historyDate
+          : accountDate ? loyaltyAccount.lastStampAt : historyDate;
+        const historyLifetime = stampHistory?.awardedStamps ?? null;
+        const lifetimeStamps = loyaltyAccount.lifetimeStamps === undefined
+          ? historyLifetime
+          : Math.max(loyaltyAccount.lifetimeStamps, historyLifetime ?? 0);
+
+        setLoyalty({
+          stamps: loyaltyAccount.stamps,
+          currentStamps: loyaltyAccount.currentStamps,
+          lifetimeStamps,
+          rewardsEarned: loyaltyAccount.rewardsEarned ?? null,
+          rewardsRedeemed: loyaltyAccount.rewardsRedeemed ?? null,
+          lastStampAt,
+          loyaltyAccountExists: loyaltyAccount.exists,
+          stampHistoryCount: historyLifetime,
+          stampHistoryLatestAt: historyDate,
+          rewardStatus: loyaltyAccount.status ?? null,
+          status: "live",
+        });
+      };
+
+      unsubLoyalty = subscribeLoyalty(
         clientId,
         uid,
         (acc) => {
           if (cancelled) return;
-          if (!acc.belongsToClient) console.warn("[loyalty] loyaltyAccounts doc belongs to another business; showing 0 here.");
+          loyaltyAccount = acc;
           console.info(`[diag] Firestore loyalty read PASS · exists=${acc.exists} stamps=${acc.stamps}`);
           patchDiag({ loyalty: { status: "pass", path: loyaltyPath, exists: acc.exists, stamps: acc.stamps } });
-          setLoyalty({ stamps: acc.stamps, rewardStatus: acc.status ?? null, status: "live" });
+          publishLoyaltyState();
         },
         (e) => {
           const code = errorCode(e);
           console.warn(`[diag] Firestore loyalty read FAIL · ${code} · ${loyaltyPath}`);
           patchDiag({ loyalty: { status: "fail", path: loyaltyPath, code } });
           if (!cancelled) setLoyalty({ status: "unavailable" });
+        }
+      );
+
+      const historyPath = `clients/${clientId}/stampTransactions`;
+      unsubStampHistory = subscribeStampHistory(
+        clientId,
+        uid,
+        (history) => {
+          if (cancelled) return;
+          stampHistory = history;
+          publishLoyaltyState();
+        },
+        (e) => {
+          const code = errorCode(e);
+          console.warn(`[diag] Firestore stamp history read FAIL · ${code} · ${historyPath}`);
+          // The live loyalty account remains authoritative for current stamps and
+          // cooldown. Lifetime falls back to an explicit account counter only.
+          stampHistory = null;
+          publishLoyaltyState();
         }
       );
 
@@ -104,7 +173,8 @@ export function FirebaseSessionBridge() {
 
     return () => {
       cancelled = true;
-      unsub?.();
+      unsubLoyalty?.();
+      unsubStampHistory?.();
     };
   }, [hydrated, source, clientId, slug, syncAttempt, setIdentity, setCustomerToken, setLoyalty, setProfile, patchDiag]);
 

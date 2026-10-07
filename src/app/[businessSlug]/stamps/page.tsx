@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { StampGrid } from "@/components/StampCard";
 import { StatusScreen } from "@/components/StatusScreen";
@@ -10,19 +10,33 @@ import { ProfileGate } from "@/components/customer/ProfileGate";
 import { useClient, useClientHref, useSession } from "@/components/ClientProvider";
 import { loyaltyService } from "@/services/loyaltyService";
 import { trackEvent } from "@/services/firebase/analyticsService";
+import { formatFirestoreTimestamp } from "@/shared/firestoreTimestamp";
+import { formatCooldownRemaining, getStampCooldown } from "@/shared/loyaltyDisplay";
 import { Coffee } from "@/components/icons";
 
 export default function StampsPage() {
   const client = useClient();
   const href = useClientHref();
   const stamps = useSession((s) => s.stamps);
+  const currentStamps = useSession((s) => s.currentStamps);
+  const lifetimeStamps = useSession((s) => s.lifetimeStamps);
+  const lastStampAt = useSession((s) => s.lastStampAt);
+  const loyaltyAccountExists = useSession((s) => s.loyaltyAccountExists);
+  const stampHistoryCount = useSession((s) => s.stampHistoryCount);
+  const loyaltyStatus = useSession((s) => s.loyaltyStatus);
   const rewardStatus = useSession((s) => s.rewardStatus);
+  const [clock, setClock] = useState(() => Date.now());
   const { loyalty } = client;
 
   useEffect(() => {
     if (loyalty.enabled) trackEvent(client, "LOYALTY_VIEWED");
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per visit
   }, [client.id, loyalty.enabled]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   if (!loyalty.enabled) {
     return (
@@ -40,6 +54,39 @@ export default function StampsPage() {
 
   const earned = loyaltyService.hasReward(stamps, loyalty, rewardStatus);
   const rewardCopy = loyalty.rewardDescription ?? `Collect ${loyalty.stampTarget} stamps to get a ${loyalty.rewardName.toLowerCase()} on us!`;
+  const cooldown = getStampCooldown(lastStampAt, clock);
+  const firstStampEligible = loyaltyStatus === "live"
+    && loyaltyAccountExists === false
+    && stampHistoryCount === 0;
+  const stampEligible = loyaltyStatus !== "live"
+    ? null
+    : cooldown.eligible ?? (firstStampEligible ? true : null);
+  const cooldownStatus = stampEligible === true
+    ? "Eligible now"
+    : stampEligible === false
+      ? "Not eligible yet"
+      : loyaltyStatus === "live" && stampHistoryCount === null
+        ? "Checking authoritative history"
+        : "Could not verify eligibility";
+  const currentStampsDisplay = loyaltyStatus === "live"
+    ? String(currentStamps ?? stamps)
+    : "—";
+  const lifetimeStampsDisplay = loyaltyStatus === "live" && lifetimeStamps !== null
+    ? String(lifetimeStamps)
+    : "—";
+  const lastStampDisplay = loyaltyStatus === "live"
+    ? formatFirestoreTimestamp(lastStampAt, { withTime: true })
+    : "—";
+  const nextEligibleDisplay = stampEligible === true
+    ? "Eligible now"
+    : cooldown.state === "active"
+      ? formatFirestoreTimestamp(cooldown.nextStampAt, { withTime: true })
+      : "—";
+  const remainingCooldown = stampEligible === true
+    ? "None"
+    : cooldown.state === "active"
+      ? formatCooldownRemaining(cooldown.remainingMs)
+      : "—";
 
   return (
     <div className="flex min-h-full flex-col">
@@ -55,6 +102,29 @@ export default function StampsPage() {
               <p className="text-sm text-muted">towards a {loyalty.rewardName.toLowerCase()}</p>
             </div>
             <LoyaltySyncNotice />
+            <dl className="mt-5 divide-y divide-line-soft border-t border-line-soft text-sm">
+              {[
+                ["Current stamps", currentStampsDisplay],
+                ["Lifetime stamps", lifetimeStampsDisplay],
+                ["Last stamp", lastStampDisplay],
+                ["Next eligible stamp", nextEligibleDisplay],
+                ["Remaining cooldown", remainingCooldown],
+              ].map(([label, value]) => (
+                <div key={label} className="flex items-center justify-between gap-3 py-2.5">
+                  <dt className="text-muted">{label}</dt>
+                  <dd className="text-right font-semibold text-primary">{value}</dd>
+                </div>
+              ))}
+              <div className="flex items-center justify-between gap-3 py-2.5">
+                <dt className="text-muted">Stamp status</dt>
+                <dd className={`text-right font-bold ${stampEligible === false ? "text-danger" : "text-primary"}`}>
+                  {cooldownStatus}
+                </dd>
+              </div>
+            </dl>
+            <p className="mt-2 text-center text-[11px] text-muted">
+              This status is informational. Staff confirms eligibility when your stamp is recorded.
+            </p>
           </div>
 
           <div

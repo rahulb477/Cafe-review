@@ -1,120 +1,156 @@
 import { customerIdentityKey } from "./phone";
+import { formatFirestoreTimestamp, parseFirestoreTimestamp, type FirestoreTimestampFormatOptions } from "./firestoreTimestamp";
+import { formatCooldownRemaining, getStampCooldown, reconcileLifetimeStamps, safeCountValue, summarizeStampHistory, type HistoryRow } from "./loyaltyDisplay";
 
-/**
- * Safe display mapping for customers/{uid} + loyaltyAccounts/{uid}.
- * Framework-agnostic and alias-free so the Admin Panel and Staff App can import
- * or copy it verbatim. Never returns "undefined", "Invalid Date" or "NaN".
- */
+export { formatFirestoreDate, formatFirestoreTimestamp, parseFirestoreTimestamp, toDateSafe } from "./firestoreTimestamp";
+export type FormatOptions = FirestoreTimestampFormatOptions;
 
+/** Safe display fallbacks shared by Admin and Staff integrations. */
 export const FALLBACK = {
-  name: "Unnamed customer",
+  name: "—",
   phone: "—",
   email: "—",
-  visits: "0",
-  lastVisit: "No visits yet",
-  date: "Date unavailable",
+  visits: "—",
+  lastVisit: "—",
+  date: "—",
 } as const;
 
-/**
- * Converts any Firestore-ish date value to a valid Date, or null.
- * Supports: Firestore Timestamp (toDate), {seconds,nanoseconds} / {_seconds}
- * (serialized Timestamps), JS Date, ISO / REST timestampValue strings, and
- * numeric epochs (ms, or seconds when < 1e11).
- */
-export function toDateSafe(value: unknown): Date | null {
-  if (value === null || value === undefined || value === "") return null;
-  let date: Date | null = null;
-
-  if (value instanceof Date) date = value;
-  else if (typeof value === "object") {
-    const v = value as { toDate?: () => unknown; seconds?: unknown; _seconds?: unknown; nanoseconds?: unknown; _nanoseconds?: unknown };
-    if (typeof v.toDate === "function") {
-      const d = v.toDate();
-      date = d instanceof Date ? d : null;
-    } else {
-      const s = typeof v.seconds === "number" ? v.seconds : typeof v._seconds === "number" ? v._seconds : null;
-      const ns = typeof v.nanoseconds === "number" ? v.nanoseconds : typeof v._nanoseconds === "number" ? v._nanoseconds : 0;
-      if (s !== null) date = new Date(s * 1000 + Math.floor(ns / 1e6));
-    }
-  } else if (typeof value === "number") {
-    if (Number.isFinite(value) && value > 0) date = new Date(value < 1e11 ? value * 1000 : value);
-  } else if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (/^\d+$/.test(trimmed)) return toDateSafe(Number(trimmed));
-    date = new Date(trimmed);
-  }
-
-  return date && !Number.isNaN(date.getTime()) ? date : null;
-}
-
-export interface FormatOptions {
-  fallback?: string;
-  withTime?: boolean;
-  locale?: string;
-  timeZone?: string;
-}
-
-/** "12 Oct 2026" (or "12 Oct 2026, 4:05 pm" withTime), else the fallback. */
-export function formatFirestoreDate(value: unknown, opts: FormatOptions = {}): string {
-  const date = toDateSafe(value);
-  if (!date) return opts.fallback ?? FALLBACK.date;
-  return new Intl.DateTimeFormat(opts.locale ?? "en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    ...(opts.withTime ? { hour: "numeric", minute: "2-digit" } : {}),
-    ...(opts.timeZone ? { timeZone: opts.timeZone } : {}),
-  }).format(date);
-}
-
-/** Non-negative integer or 0 (handles missing, strings, NaN, negatives). */
+/** Non-negative integer or 0; useful for ranking and aggregation code. */
 export function safeCount(value: unknown): number {
-  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  return safeCountValue(value) ?? 0;
 }
 
-const text = (v: unknown, fallback: string) => (typeof v === "string" && v.trim() ? v.trim() : fallback);
+function text(value: unknown, fallback = "—"): string {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function optionalCount(value: unknown): number | null {
+  return safeCountValue(value);
+}
+
+function firstText(data: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = typeof data[key] === "string" ? (data[key] as string).trim() : "";
+    if (value) return value;
+  }
+  return null;
+}
+
+/** A visible customer identifier is a human-readable code, never a Firebase UID. */
+export function formatCustomerCode(customer: Record<string, unknown> | null | undefined): string {
+  if (!customer) return FALLBACK.phone;
+  const value = firstText(customer, ["customerCode", "code", "customerNumber"]);
+  if (!value) return FALLBACK.phone;
+  return value.startsWith("#") ? value : `#${value}`;
+}
 
 export interface CustomerDisplay {
+  /** Human-readable code for display; this is not the Firestore document id/UID. */
   customerId: string;
+  customerCode: string;
   name: string;
   phone: string;
   email: string;
   totalVisits: string;
-  totalVisitsNumber: number;
+  totalVisitsNumber: number | null;
   lastVisit: string;
   joined: string;
-  stamps: number;
+  /** Backwards-compatible alias for currentStamps. */
+  stamps: number | null;
+  currentStamps: number | null;
+  currentStampsDisplay: string;
+  lifetimeStamps: number | null;
   stampTarget: number | null;
+  stampProgress: string;
+  rewardsEarned: number | null;
+  rewardsRedeemed: number | null;
+  lastStamp: string;
+  nextStampAt: string;
+  cooldownState: "unknown" | "active" | "elapsed";
+  cooldownEligible: boolean | null;
+  cooldownLabel: string;
+  cooldownRemaining: string;
   rewardName: string | null;
+  rewardStatus: string;
+}
+
+export interface CustomerDisplayOptions extends Pick<FormatOptions, "locale" | "timeZone"> {
+  /** Tenant target, used only when the customer/account has no stored target. */
+  stampTarget?: unknown;
+  /** Injected clock and history make customer mapping deterministic and testable. */
+  now?: Date | number;
+  stampTransactions?: HistoryRow[];
 }
 
 /**
- * customers/{uid} (+ optional loyaltyAccounts/{uid}) → display strings.
- * `id` is the Firestore document id, used when `uid` is missing on old docs.
+ * customers/{uid} + loyaltyAccounts/{customerId} → display-safe customer data.
+ * `id` remains an internal join key and is deliberately never returned as the
+ * customer-facing ID; customerCode/code/customerNumber is used instead.
  */
 export function mapCustomerForDisplay(
   id: string,
   customer: Record<string, unknown> | null | undefined,
   loyalty?: Record<string, unknown> | null,
-  opts: Pick<FormatOptions, "locale" | "timeZone"> = {}
+  opts: CustomerDisplayOptions = {}
 ): CustomerDisplay {
   const c = customer ?? {};
   const l = loyalty ?? {};
-  const visits = safeCount(c.totalVisits);
-  const target = safeCount(l.stampTarget);
+  const clientId = text(c.clientId, "");
+  const customerId = text(c.uid ?? c.customerId, id);
+  const history = opts.stampTransactions && clientId && customerId
+    ? summarizeStampHistory(opts.stampTransactions, clientId, customerId)
+    : null;
+
+  const storedVisits = optionalCount(c.totalVisits);
+  const visits = storedVisits === null && history
+    ? history.countedVisits
+    : storedVisits !== null && history
+      ? Math.max(storedVisits, history.countedVisits)
+      : storedVisits;
+  // The live Staff App currently writes `stamps`. Prefer that field while it is
+  // authoritative, then accept the newer alias for unmigrated writers.
+  const currentStamps = optionalCount(l.stamps) ?? optionalCount(l.currentStamps);
+  const rawTarget = optionalCount(l.stampTarget) ?? optionalCount(c.stampTarget) ?? optionalCount(opts.stampTarget);
+  const target = rawTarget !== null && rawTarget > 0 ? rawTarget : null;
+  const lifetimeStamps = reconcileLifetimeStamps(l, history);
+  const customerCode = formatCustomerCode(c);
+  const lastStampDate = parseFirestoreTimestamp(l.lastStampAt) ?? history?.latestStampAt ?? null;
+  const lastVisitDate = parseFirestoreTimestamp(c.lastVisitAt) ?? history?.latestVisitAt ?? null;
+  const cooldown = getStampCooldown(lastStampDate, opts.now);
+  const displayOptions = { locale: opts.locale, timeZone: opts.timeZone };
+
+  let rewardStatus = firstText(l, ["rewardStatus", "rewardState"]);
+  if (!rewardStatus && (l.rewardAvailable === true || l.rewardUnlocked === true)) rewardStatus = "Reward available";
+  if (rewardStatus) rewardStatus = rewardStatus.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+
   return {
-    customerId: text(c.uid, id || FALLBACK.phone),
-    name: text(c.name, FALLBACK.name),
-    phone: text(c.phone, FALLBACK.phone),
-    email: text(c.email, FALLBACK.email),
-    totalVisits: String(visits),
+    // Historical integrations used this property as the visible ID. It now
+    // carries the human-readable code and never falls back to a Firebase UID.
+    customerId: customerCode,
+    customerCode,
+    name: text(c.name),
+    phone: text(c.phone ?? c.normalizedPhone),
+    email: text(c.email),
+    totalVisits: visits === null ? FALLBACK.visits : String(visits),
     totalVisitsNumber: visits,
-    lastVisit: formatFirestoreDate(c.lastVisitAt, { ...opts, withTime: true, fallback: FALLBACK.lastVisit }),
-    joined: formatFirestoreDate(c.createdAt, { ...opts, fallback: FALLBACK.date }),
-    stamps: safeCount(l.stamps),
-    stampTarget: target > 0 ? target : null,
-    rewardName: typeof l.rewardName === "string" && l.rewardName.trim() ? l.rewardName.trim() : null,
+    lastVisit: formatFirestoreTimestamp(lastVisitDate, { ...displayOptions, withTime: true }),
+    joined: formatFirestoreTimestamp(c.createdAt, displayOptions),
+    stamps: currentStamps,
+    currentStamps,
+    currentStampsDisplay: currentStamps === null ? "—" : String(currentStamps),
+    lifetimeStamps,
+    stampTarget: target,
+    stampProgress: currentStamps !== null && target !== null ? `${currentStamps}/${target}` : "—",
+    rewardsEarned: optionalCount(l.rewardsEarned),
+    rewardsRedeemed: optionalCount(l.rewardsRedeemed),
+    lastStamp: formatFirestoreTimestamp(lastStampDate, { ...displayOptions, withTime: true }),
+    nextStampAt: cooldown.nextStampAt ? formatFirestoreTimestamp(cooldown.nextStampAt, { ...displayOptions, withTime: true }) : "—",
+    cooldownState: cooldown.state,
+    cooldownEligible: cooldown.eligible,
+    cooldownLabel: cooldown.label,
+    cooldownRemaining: formatCooldownRemaining(cooldown.remainingMs),
+    rewardName: firstText(l, ["rewardName"]),
+    rewardStatus: rewardStatus ?? "—",
   };
 }
 
@@ -133,19 +169,19 @@ export interface DuplicateGroup {
 }
 
 function createdMillis(row: CustomerRow): number {
-  return toDateSafe(row.data?.createdAt)?.getTime() ?? Number.POSITIVE_INFINITY;
+  return parseFirestoreTimestamp(row.data?.createdAt)?.getTime() ?? Number.POSITIVE_INFINITY;
 }
 
 /**
- * For Admin customer lists: shows each business + normalized phone ONCE and
- * reports leftover legacy duplicates instead of hiding them silently.
- * Customers soft-merged by scripts/dedupe-customers.mjs (status "merged") are excluded.
- * Canonical row: earliest valid createdAt, then most visits, then id.
+ * Shows each business + normalized phone once and reports potential duplicates.
+ * A matching name alone is never treated as a duplicate; records need the same
+ * business and a valid normalized phone. Merged records are excluded.
  */
 export function dedupeCustomers<T extends CustomerRow>(rows: T[]): { unique: T[]; duplicateGroups: DuplicateGroup[] } {
-  const live = rows.filter((r) => r.data?.status !== "merged");
+  const live = rows.filter((row) => row.data?.status !== "merged");
   const groups = new Map<string, T[]>();
   const unique: T[] = [];
+
   for (const row of live) {
     const key = customerIdentityKey(row.data?.clientId, row.data?.normalizedPhone ?? row.data?.phone);
     if (!key) {
@@ -156,13 +192,14 @@ export function dedupeCustomers<T extends CustomerRow>(rows: T[]): { unique: T[]
     if (list) list.push(row);
     else groups.set(key, [row]);
   }
+
   const duplicateGroups: DuplicateGroup[] = [];
   for (const [key, list] of groups) {
     const sorted = [...list].sort(
       (a, b) => createdMillis(a) - createdMillis(b) || safeCount(b.data?.totalVisits) - safeCount(a.data?.totalVisits) || a.id.localeCompare(b.id)
     );
     unique.push(sorted[0]);
-    if (sorted.length > 1) duplicateGroups.push({ key, canonicalId: sorted[0].id, duplicateIds: sorted.slice(1).map((r) => r.id) });
+    if (sorted.length > 1) duplicateGroups.push({ key, canonicalId: sorted[0].id, duplicateIds: sorted.slice(1).map((row) => row.id) });
   }
   return { unique, duplicateGroups };
 }

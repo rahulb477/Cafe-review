@@ -24,8 +24,16 @@ export interface ClientSessionState {
   customerId: string;
   review: ReviewDraft;
   generatedReview: string | null;
-  /** Read-only mirror of the server loyalty account. */
+  /** Read-only mirror of current stamps from loyaltyAccounts/{uid}. */
   stamps: number;
+  currentStamps: number | null;
+  lifetimeStamps: number | null;
+  rewardsEarned: number | null;
+  rewardsRedeemed: number | null;
+  lastStampAt: unknown | null;
+  loyaltyAccountExists: boolean | null;
+  stampHistoryCount: number | null;
+  stampHistoryLatestAt: unknown | null;
   rewardStatus: string | null;
   loyaltyStatus: LoyaltySyncStatus;
   /** Firebase anonymous UID (Firebase tenants only). */
@@ -49,7 +57,19 @@ export interface ClientSessionState {
   hydrate: () => void;
   setIdentity: (uid: string) => void;
   setCustomerToken: (token: string | null) => void;
-  setLoyalty: (l: { stamps?: number; rewardStatus?: string | null; status: LoyaltySyncStatus }) => void;
+  setLoyalty: (l: {
+    stamps?: number;
+    currentStamps?: number | null;
+    lifetimeStamps?: number | null;
+    rewardsEarned?: number | null;
+    rewardsRedeemed?: number | null;
+    lastStampAt?: unknown | null;
+    loyaltyAccountExists?: boolean | null;
+    stampHistoryCount?: number | null;
+    stampHistoryLatestAt?: unknown | null;
+    rewardStatus?: string | null;
+    status: LoyaltySyncStatus;
+  }) => void;
   retrySync: () => void;
   setProfile: (profile: CustomerProfile | null, status: ProfileStatus) => void;
   /** Heart/un-heart a menu item (device-local favourites). */
@@ -121,6 +141,14 @@ export function createClientStore(clientId: string, clientSlug: string) {
     review: { ...emptyReview },
     generatedReview: null,
     stamps: 0,
+    currentStamps: 0,
+    lifetimeStamps: null,
+    rewardsEarned: null,
+    rewardsRedeemed: null,
+    lastStampAt: null,
+    loyaltyAccountExists: null,
+    stampHistoryCount: null,
+    stampHistoryLatestAt: null,
     rewardStatus: null,
     loyaltyStatus: "idle",
     authUid: null,
@@ -175,8 +203,20 @@ export function createClientStore(clientId: string, clientSlug: string) {
     setGeneratedReview: (text) => set({ generatedReview: text }),
     setIdentity: (uid) => set({ authUid: uid, customerId: uid }),
     setCustomerToken: (token) => set({ customerToken: token }),
-    setLoyalty: ({ stamps, rewardStatus, status }) =>
-      set((s) => ({ stamps: stamps ?? s.stamps, rewardStatus: rewardStatus !== undefined ? rewardStatus : s.rewardStatus, loyaltyStatus: status })),
+    setLoyalty: ({ stamps, currentStamps, lifetimeStamps, rewardsEarned, rewardsRedeemed, lastStampAt, loyaltyAccountExists, stampHistoryCount, stampHistoryLatestAt, rewardStatus, status }) =>
+      set((s) => ({
+        stamps: stamps ?? s.stamps,
+        currentStamps: currentStamps !== undefined ? currentStamps : stamps ?? s.currentStamps,
+        lifetimeStamps: lifetimeStamps !== undefined ? lifetimeStamps : s.lifetimeStamps,
+        rewardsEarned: rewardsEarned !== undefined ? rewardsEarned : s.rewardsEarned,
+        rewardsRedeemed: rewardsRedeemed !== undefined ? rewardsRedeemed : s.rewardsRedeemed,
+        lastStampAt: lastStampAt !== undefined ? lastStampAt : s.lastStampAt,
+        loyaltyAccountExists: loyaltyAccountExists !== undefined ? loyaltyAccountExists : s.loyaltyAccountExists,
+        stampHistoryCount: stampHistoryCount !== undefined ? stampHistoryCount : s.stampHistoryCount,
+        stampHistoryLatestAt: stampHistoryLatestAt !== undefined ? stampHistoryLatestAt : s.stampHistoryLatestAt,
+        rewardStatus: rewardStatus !== undefined ? rewardStatus : s.rewardStatus,
+        loyaltyStatus: status,
+      })),
     retrySync: () => set((s) => ({ syncAttempt: s.syncAttempt + 1, loyaltyStatus: "connecting", profileStatus: s.profile ? "ready" : "loading" })),
     setProfile: (profile, profileStatus) => set({ profile, profileStatus }),
     toggleFavorite: (menuItemId) =>
