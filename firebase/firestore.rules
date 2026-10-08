@@ -315,16 +315,37 @@ service cloud.firestore {
 
       match /feedback/{feedbackId} {
 
+        // Customers may create a single anonymous feedback document only.
+        // There are intentionally no customer update/delete rules: Admin access
+        // remains governed by the top-level isActiveAdmin rule above.
         allow create:
           if signedIn()
           && clientIsPublic(clientId)
           && request.resource.data.keys().hasOnly([
             'clientId',
-            'message',
             'rating',
-            'table',
-            'location',
-            'createdAt'
+            'message',
+            'source',
+            'status',
+            'adminReply',
+            'aiReply',
+            'repliedAt',
+            'repliedBy',
+            'createdAt',
+            'updatedAt'
+          ])
+          && request.resource.data.keys().hasAll([
+            'clientId',
+            'rating',
+            'message',
+            'source',
+            'status',
+            'adminReply',
+            'aiReply',
+            'repliedAt',
+            'repliedBy',
+            'createdAt',
+            'updatedAt'
           ])
           && request.resource.data.clientId == clientId
           && request.resource.data.message is string
@@ -338,20 +359,21 @@ service cloud.firestore {
               && request.resource.data.rating <= 5
             )
           )
-          && optStr(
-            request.resource.data,
-            'table',
-            32
-          )
-          && optStr(
-            request.resource.data,
-            'location',
-            32
-          )
-          && request.resource.data.createdAt == request.time;
+          && request.resource.data.source == 'customer_feedback'
+          && request.resource.data.status == 'new'
+          && request.resource.data.adminReply == null
+          && request.resource.data.aiReply == null
+          && request.resource.data.repliedAt == null
+          && request.resource.data.repliedBy == null
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
 
         allow read:
           if isStaffOf(clientId);
+
+        // No customer mutation after creation. The existing global Admin rule
+        // above remains the only non-create path for feedback changes.
+        allow update, delete: if false;
       }
 
       // ==========================================================
