@@ -1,52 +1,103 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { Button } from "@/components/ui/Button";
 import { Chat, Star, Check } from "@/components/icons";
-import { submitFeedback } from "@/services/feedbackService";
+import { submitFeedback, clearPendingFeedback, FEEDBACK_CONFIRMED_EVENT, getPendingFeedback } from "@/services/feedbackService";
 import { trackEvent } from "@/services/firebase/analyticsService";
-import { useClient, useClientHref, useSession } from "@/components/ClientProvider";
+import { useClient, useClientHref } from "@/components/ClientProvider";
 
 const MIN_LENGTH = 3;
 const MAX_LENGTH = 2000;
+const STAR_RATINGS = [1, 2, 3, 4, 5] as const;
+type StarRating = (typeof STAR_RATINGS)[number];
 
 export default function FeedbackPage() {
   const router = useRouter();
   const client = useClient();
   const href = useClientHref();
-  const tableNumber = useSession((s) => s.tableNumber);
-  const location = useSession((s) => s.location);
   const [message, setMessage] = useState("");
-  const [rating, setRating] = useState(0);
+  const [rating, setRating] = useState<StarRating | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
+  const submittingRef = useRef(false);
   const trimmed = message.trim();
   const tooShort = trimmed.length < MIN_LENGTH;
+  const tooLong = message.length > MAX_LENGTH;
+
+  useEffect(() => {
+    // Defer browser-storage hydration until after the first paint to keep the
+    // server and initial client render identical.
+    const restoreTimer = window.setTimeout(() => {
+      const pending = getPendingFeedback(client.id);
+      if (pending) {
+        setMessage(pending.message);
+        setRating(pending.rating);
+        if (pending.confirmed) {
+          setStatus("done");
+        } else if (pending.attempted) {
+          setStatus("error");
+          setError("We couldn't confirm your previous submission. Tap Try Again to safely retry it.");
+        }
+      }
+    }, 0);
+
+    const onConfirmed = (event: Event) => {
+      const detail = (event as CustomEvent<{ clientId?: string }>).detail;
+      if (detail?.clientId !== client.id) return;
+      setError(null);
+      setStatus("done");
+    };
+    window.addEventListener(FEEDBACK_CONFIRMED_EVENT, onConfirmed);
+    return () => {
+      window.clearTimeout(restoreTimer);
+      window.removeEventListener(FEEDBACK_CONFIRMED_EVENT, onConfirmed);
+    };
+  }, [client.id]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (status === "loading") return;
+    if (submittingRef.current || status === "loading") return;
     setError(null);
     if (tooShort) {
       setError(`Please tell us a little more (at least ${MIN_LENGTH} characters).`);
       return;
     }
+    if (tooLong) {
+      setError(`Feedback must be ${MAX_LENGTH} characters or fewer.`);
+      return;
+    }
+
+    submittingRef.current = true;
     setStatus("loading");
     try {
       await submitFeedback(client, {
-        message: trimmed,
-        rating: rating || null,
-        tableNumber,
-        location,
+        // Preserve the textarea value exactly; trimming is only used for validation.
+        message,
+        rating,
       });
-      // Feedback stays anonymous: the event carries no customer identity.
-      trackEvent(client, "FEEDBACK_SUBMITTED", { tableId: tableNumber, includeCustomer: false });
+      // Track no rating, message, or customer identity in the analytics event.
+      trackEvent(client, "FEEDBACK_SUBMITTED", { includeCustomer: false });
       setStatus("done");
     } catch (err) {
+      const pending = getPendingFeedback(client.id);
+      if (pending?.confirmed) {
+        setError(null);
+        setStatus("done");
+        return;
+      }
+      if (pending && (pending.message !== message || pending.rating !== rating)) {
+        // Restore the first in-flight intent rather than making a second record
+        // if the customer edited the form while a network result was uncertain.
+        setMessage(pending.message);
+        setRating(pending.rating);
+      }
       setStatus("error");
       setError(err instanceof Error ? err.message : "We couldn't send your feedback. Please try again.");
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -66,14 +117,23 @@ export default function FeedbackPage() {
             <Button
               full
               onClick={() => {
+                clearPendingFeedback(client.id);
                 setMessage("");
-                setRating(0);
+                setRating(null);
+                setError(null);
                 setStatus("idle");
               }}
             >
               Send more feedback
             </Button>
-            <Button variant="secondary" full onClick={() => router.push(href("/"))}>
+            <Button
+              variant="secondary"
+              full
+              onClick={() => {
+                clearPendingFeedback(client.id);
+                router.push(href("/"));
+              }}
+            >
               Back to Home
             </Button>
           </div>
@@ -105,17 +165,21 @@ export default function FeedbackPage() {
             How would you rate us? <span className="font-normal text-muted">(optional)</span>
           </p>
           <div className="mt-2 flex items-center gap-1.5" role="radiogroup" aria-labelledby="rating-label">
-            {[1, 2, 3, 4, 5].map((n) => (
+            {STAR_RATINGS.map((n) => (
               <button
                 key={n}
                 type="button"
                 role="radio"
                 aria-checked={rating === n}
-                onClick={() => setRating(n === rating ? 0 : n)}
+                onClick={() => {
+                  setRating(rating === n ? null : n);
+                  if (error) setError(null);
+                  if (status === "error") setStatus("idle");
+                }}
                 aria-label={`${n} star${n > 1 ? "s" : ""}`}
                 className="press grid h-11 w-11 place-items-center text-accent"
               >
-                <Star filled={rating >= n} width={34} height={34} />
+                <Star filled={rating !== null && rating >= n} width={34} height={34} />
               </button>
             ))}
           </div>
@@ -156,7 +220,7 @@ export default function FeedbackPage() {
           className="sticky z-10 border-t border-primary/10 bg-canvas/95 px-5 py-3 backdrop-blur-md"
           style={{ bottom: "calc(64px + var(--safe-bottom))" }}
         >
-          <Button full size="lg" type="submit" disabled={status === "loading" || tooShort} aria-busy={status === "loading"}>
+          <Button full size="lg" type="submit" disabled={status === "loading" || tooShort || tooLong} aria-busy={status === "loading"}>
             {status === "loading" ? "Sending…" : status === "error" ? "Try Again" : "Submit Feedback"}
           </Button>
         </div>

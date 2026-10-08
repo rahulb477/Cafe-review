@@ -33,15 +33,19 @@ AI keys are server-only; without `AI_API_KEY` the mock provider is used.
 | Menu | `clients/{id}/menuCategories`, `clients/{id}/menuItems` (`active`, `sortOrder`) | read (live) |
 | Loyalty | `loyaltyAccounts/{uid}` (canonical, top-level; `clientId`, `customerId`, `stamps`, reward fields) | **get own only** — Staff/Admin write |
 | Customer | `customers/{uid}` + `customerTokens/{token}` (opaque QR token) | create own |
-| Feedback | `clients/{id}/feedback` (anonymous) | create only |
+| Feedback | `clients/{id}/feedback/{feedbackId}` (anonymous; `rating` is the overall rating source) | create only |
 | Reviews | `clients/{id}/reviews` | create only |
 | Analytics | `clients/{id}/events` | create only |
 
 - Server resolves tenants via Firestore REST (ISR 60s); the browser keeps config + menu live with `onSnapshot`.
 - Customer identity = Firebase Anonymous Auth (enable it in Firebase console → Authentication → Sign-in method).
 - Customer App is **Firebase-only**: no PostgreSQL, no Drizzle, no `DATABASE_URL` (builds and deploys with zero database env vars).
-  Feedback/reviews are written to Firestore by the browser SDK; `/api/feedback` and `/api/reviews` are Firebase-only
-  compatibility shims for bundled demo tenants (they never touch a database). AI usage counters live in process memory.
+  Anonymous feedback is written directly to `clients/{clientId}/feedback/{feedbackId}` by the browser SDK with a
+  stable pending document ID, `rating` (or `null`), the unmodified message, and server timestamps. Feedback records
+  contain no customer identity; the customer can create them but cannot read, update, or delete them. The old
+  `/api/feedback` no-op endpoint is disabled so it cannot report an unsaved submission as successful. Review-flow
+  writes continue to use the browser SDK; `/api/reviews` remains its existing compatibility shim. AI usage counters
+  live in process memory.
 - Services: `src/services/firebase/*` (single init in `firebaseClient.ts`, config + project guard in `firebaseConfig.ts`).
 - Rules: `firebase/firestore.rules`, `firebase/storage.rules`, `firebase/database.rules.json`
   → merge with the Admin App's rules, then `firebase deploy --only firestore:rules,storage,database`.
